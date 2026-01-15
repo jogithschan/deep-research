@@ -2,6 +2,7 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
 from src.graph import build_graph
+from src import ui
 
 def main():
     if not os.getenv("ANTHROPIC_API_KEY") or not os.getenv("TAVILY_API_KEY"):
@@ -9,8 +10,9 @@ def main():
         return
 
     # User Input
-    print("--- DEEP RESEARCH AGENT POC ---")
-    company = input("Enter Company Name to Research: ")
+    ui.console.clear()
+    company = input("Enter Company Name: ")
+    ui.print_header(company)
     
     # Initialize Graph
     app = build_graph()
@@ -27,12 +29,7 @@ def main():
     with open(filename, "w", encoding='utf-8') as f:
         f.write(result["final_report"])
         
-    print(f"\n✅ Report generated successfully: {filename}")
-    print("-" * 50)
-    print("Preview of Executive Summary:")
-    print("-" * 50)
-    # Simple print of first 500 chars
-    print(result["final_report"][:500] + "...")
+    ui.console.print(f"\n[bold green]Report saved to {filename}[/bold green]")
 
 if __name__ == "__main__":
     main()

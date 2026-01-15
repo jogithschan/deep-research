@@ -5,21 +5,19 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_core.messages import HumanMessage
 from tavily import TavilyClient
 from .state import AgentState
+from . import ui  # <--- The visual helper
 
 # Initialize Tools
-# Ensure API keys are loaded in main.py or env
+# (Assuming keys are set in main.py or env)
 llm = ChatAnthropic(model="claude-sonnet-4-5", temperature=0)
-
-def get_tavily():
-    return TavilyClient() # Will pick up env var when called, not at import
+tavily = TavilyClient()
 
 def identify_company(state: AgentState):
     """
     Resolves the company name to ensure we are looking at the right entity.
     """
-    tavily = get_tavily()
     target = state['company_name']
-    print(f"\n--- 1. IDENTIFYING ENTITY: {target} ---")
+    ui.print_step(f"Resolving Entity: {target}", status="running")
     
     # Search for definitive identity
     search = tavily.search(query=f"official name ticker sector business description {target}", max_results=1)
@@ -33,53 +31,65 @@ def identify_company(state: AgentState):
     """
     response = llm.invoke([HumanMessage(content=prompt)])
     
+    # VISUAL: Show the user what we found
+    ui.print_artifact("Entity Profile", response.content, style="blue")
+    
     return {"company_profile": response.content}
 
 def gather_financials(state: AgentState):
     """
-    Waterfall Logic:
-    1. Try to find & download Official Annual Report PDF (High Confidence)
-    2. Fallback to Web Search for numbers (Low Confidence)
+    Waterfall Logic: PDF -> Web Fallback
     """
-    tavily=get_tavily()
-    print("\n--- 2. GATHERING FINANCIALS ---")
+    ui.print_step("Researching Financials", status="running")
     company = state['company_name']
     
-    # --- STRATEGY A: PRIMARY SOURCE (PDF) ---
+    # --- STRATEGY A: PDF ---
     query_pdf = f"{company} 2023 2024 annual report filetype:pdf"
     results = tavily.search(query=query_pdf, max_results=5)
     
     pdf_url = None
-    # naive filter for PDFs
     for res in results['results']:
         if res['url'].endswith('.pdf'):
             pdf_url = res['url']
             break
             
     if pdf_url:
-        print(f"   -> Found PDF: {pdf_url}")
+        ui.print_step(f"Found PDF: {pdf_url}", status="complete")
         try:
             headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
             response = requests.get(pdf_url, headers=headers, timeout=15)
             
             if response.status_code == 200:
-                # Save temporarily
                 with open("temp_report.pdf", "wb") as f:
                     f.write(response.content)
                 
-                # Heuristic: Load first 20 pages (Strategy) + Last 15 pages (Financials)
-                # This fits better in context windows than the whole 200pg doc
                 loader = PyPDFLoader("temp_report.pdf")
                 pages = loader.load()
                 
-                # Safety check for empty PDFs (scanned images)
                 if len(pages) > 0:
-                    intro_text = "\n".join([p.page_content for p in pages[:20]])
-                    fin_text = "\n".join([p.page_content for p in pages[-15:]])
-                    full_text = intro_text + "\n ... [SKIPPED MIDDLE] ... \n" + fin_text
+
+                    essential_text = [p.page_content for p in pages[:5]]
+
+                    financial_keywords = [
+                        "consolidated balance sheets", 
+                        "consolidated statements of operations", 
+                        "consolidated statements of cash flows"
+                    ]
+
+                    found_financials = False
+                    for i, page in enumerate(pages):
+                        content = page.page_content.lower()
+                        if any(k in content for k in financial_keywords):
+                            # Capture this page and the next 5 pages for context
+                            end_index = min(i + 6, len(pages))
+                            essential_text.extend([p.page_content for p in pages[i:end_index]])
+                            found_financials = True
+
+                    if not found_financials:
+                        essential_text = [p.page_content for p in pages[:20]] + [p.page_content for p in pages[-10:]]
                     
-                    print("   -> PDF Downloaded & Parsed. Analyzing...")
-                    
+                    full_text = "\n".join(essential_text)
+
                     analysis_prompt = f"""
                     Analyze this Annual Report for {company}.
                     Extract key data (Estimate if exact numbers are messy):
@@ -91,8 +101,10 @@ def gather_financials(state: AgentState):
                     """
                     result = llm.invoke([HumanMessage(content=analysis_prompt)])
                     
-                    # Clean up
                     os.remove("temp_report.pdf")
+                    
+                    # VISUAL: Show the financial summary
+                    ui.print_artifact("Financial Analysis (Source: PDF)", result.content, style="green")
                     
                     return {
                         "financial_data": result.content,
@@ -100,10 +112,10 @@ def gather_financials(state: AgentState):
                         "data_confidence": "HIGH (Primary Source)"
                     }
         except Exception as e:
-            print(f"   -> PDF Strategy Failed ({str(e)}). Switching to fallback.")
+            ui.print_step(f"PDF download failed ({str(e)}). Switching strategy.", status="error")
 
-    # --- STRATEGY B: SECONDARY SOURCE (WEB) ---
-    print("   -> Using Web Fallback Strategy.")
+    # --- STRATEGY B: WEB ---
+    ui.print_step("Engaging Fallback Strategy (Web Search)", status="running")
     queries = [
         f"{company} revenue net income 2023 2024",
         f"{company} total debt cash balance sheet 2024",
@@ -119,12 +131,14 @@ def gather_financials(state: AgentState):
     fallback_prompt = f"""
     The annual report PDF was unavailable. Reconstruct the financial health of {company} 
     using these search results. 
-    
-    IMPORTANT: Explicitly state that this data is from secondary web sources.
+    Explicitly state that this data is from secondary web sources.
     
     Web Data: {web_data}
     """
     result = llm.invoke([HumanMessage(content=fallback_prompt)])
+    
+    #Visual: web summary
+    ui.print_artifact("Financial Analysis (Source: Web)", result.content, style="yellow")
     
     return {
         "financial_data": result.content,
@@ -136,14 +150,10 @@ def gather_market_data(state: AgentState):
     """
     Gathers News (Narrative) and Social (Sentiment).
     """
-    tavily=get_tavily()
-    print("\n--- 3. GATHERING MARKET CONTEXT ---")
+    ui.print_step("Analyzing Market Sentiment", status="running")
     company = state['company_name']
     
-    # News Search
     news = tavily.search(query=f"major news controversy {company} last 12 months", topic="news", days=365)
-    
-    # Social/Sentiment Search
     social = tavily.search(query=f"reddit {company} customer employee sentiment review", max_results=5)
     
     context = f"NEWS DATA: {news['results']}\n\nSOCIAL DATA: {social['results']}"
@@ -158,13 +168,20 @@ def gather_market_data(state: AgentState):
     """
     response = llm.invoke([HumanMessage(content=prompt)])
     
+    #Visual: market data
+    ui.print_artifact("Market Intelligence", response.content, style="magenta")
+    
     return {"market_data": response.content}
 
 def synthesize_report(state: AgentState):
     """
     The 'Brain'. Connects Financials + Market Data + Profile into a cohesive story.
     """
-    print("\n--- 4. WRITING FINAL REPORT ---")
+    ui.print_step("Synthesizing Final Report", status="running")
+    
+    # Simple Conflict Check for UI Visual
+    has_conflict = "conflict" in state.get('financial_data', '').lower() or "discrepancy" in state.get('market_data', '').lower()
+    ui.print_conflict_alert(has_conflict)
     
     prompt = f"""
     You are a Deep Research Agent. Write a structured investment report for {state['company_profile']}.
@@ -178,13 +195,14 @@ def synthesize_report(state: AgentState):
     REQUIREMENTS:
     1. **Executive Summary**: High-level verdict.
     2. **Conflict Analysis**: Compare Financials (Internal View) vs Market (External View). 
-       - Example: "Management says growth is strong, but user reviews cite declining quality."
-    3. **Financial Highlights**: Use the confidence level to frame this section appropriately.
+    3. **Financial Highlights**: Use the confidence level to frame this section.
     4. **Opportunities & Risks**: Synthesized from all sources.
     5. **Analyst Note**: Comment on the data quality/sources used.
     
     OUTPUT FORMAT: Markdown.
     """
     response = llm.invoke([HumanMessage(content=prompt)])
+    
+    ui.print_step("Report Generation Complete", status="complete")
     
     return {"final_report": response.content}

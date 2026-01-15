@@ -5,3 +5,4 @@ tavily-python
 pypdf
 python-dotenv
 requests
+rich
