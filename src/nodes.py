@@ -1,5 +1,6 @@
 import requests
 import os
+import json
 from langchain_anthropic import ChatAnthropic
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_core.messages import HumanMessage
@@ -20,20 +21,40 @@ def identify_company(state: AgentState):
     
     # Search for definitive identity
     search = tavily.search(query=f"official name ticker sector business description {target}", max_results=1)
-    raw_content = search['results'][0]['content']
+
+    if not search['results']:
+        return {"company_profile": f"Could not identify {target}", "company_sector": ""}
     
+    raw_content = search['results'][0]['content']
+
     prompt = f"""
-    Based on this search result, provide a clean, 3-sentence profile for {target}.
-    Include: Official Legal Name, Stock Ticker (if public), and Primary Industry.
+    Analyze {target}. Return a JSON with:
+    - name: Official Name
+    - ticker: Ticker (or None)
+    - sector: Specific Industry (e.g. "Consumer Electronics", "Software", "Financial Services")
+    - description: Brief profile
     
     Context: {raw_content}
     """
     response = llm.invoke([HumanMessage(content=prompt)])
     
-    # VISUAL: Show the user what we found
-    ui.print_artifact("Entity Profile", response.content, style="blue")
+    # JSON Parse - quick
+    try:
+        data = json.loads(response.content.replace('```json', '').replace('```', '').strip())
+        profile = f"{data['name']} ({data['ticker']}) - {data['sector']}\n{data['description']}"
+        sector = data['sector']
+        ticker = data['ticker']
+    except:
+        profile = response.content
+        sector = "Business" # fallback
+
+    ui.print_artifact("Entity Profile", profile, style="blue")
     
-    return {"company_profile": response.content}
+    return {
+        "company_profile": profile, 
+        "company_sector": sector,
+        "ticker": ticker
+    }
 
 def gather_financials(state: AgentState):
     """
@@ -41,9 +62,14 @@ def gather_financials(state: AgentState):
     """
     ui.print_step("Researching Financials", status="running")
     company = state['company_name']
-    
+    sector = state.get('company_sector', '')
+    ticker = state.get('ticker', '')
     # --- STRATEGY A: PDF ---
-    query_pdf = f"{company} 2023 2024 annual report filetype:pdf"
+    if ticker and ticker != "None":
+        query_pdf = f"{company} {ticker} annual report 2025 10-K filetype:pdf"
+    else:
+        query_pdf = f"{company} {sector} annual report 2025filetype:pdf"
+    
     results = tavily.search(query=query_pdf, max_results=5)
     
     pdf_url = None
@@ -154,14 +180,19 @@ def gather_market_data(state: AgentState):
     
     news = tavily.search(query=f"major news controversy {company} last 12 months", topic="news", days=365)
     social = tavily.search(query=f"reddit {company} customer employee sentiment review", max_results=5)
+    competitors = tavily.search(query=f"top 3 competitors {company} market share analysis 2025", max_results=3)
     
-    context = f"NEWS DATA: {news['results']}\n\nSOCIAL DATA: {social['results']}"
+    context = f"""
+    NEWS: {news['results']}
+    SENTIMENT: {social['results']}
+    COMPETITORS: {competitors['results']}
+    """
     
     prompt = f"""
     Synthesize the external market view of {company}.
     1. Timeline of key events (M&A, Leadership changes, Products).
     2. Sentiment Analysis: How do customers/employees feel? (Positive/Negative/Neutral).
-    3. Competitor Context: Who are they fighting?
+    3. Competitor Context: Who are the rivals? How does {company} stack up?
     
     Raw Data: {context}
     """
