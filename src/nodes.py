@@ -5,10 +5,9 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_core.messages import HumanMessage
 from tavily import TavilyClient
 from .state import AgentState
-from . import ui  # <--- The visual helper
+from . import ui
 
 # Initialize Tools
-# (Assuming keys are set in main.py or env)
 llm = ChatAnthropic(model="claude-sonnet-4-5", temperature=0)
 tavily = TavilyClient()
 
@@ -184,7 +183,8 @@ def synthesize_report(state: AgentState):
     ui.print_conflict_alert(has_conflict)
     
     prompt = f"""
-    You are a Deep Research Agent. Write a structured investment report for {state['company_profile']}.
+    You are a Deep Research Agent. 
+    Write a comprehensive Investment Research Report for {state['company_profile']}.
     
     INPUTS:
     - Data Confidence Level: {state.get('data_confidence', 'Unknown')}
@@ -192,14 +192,45 @@ def synthesize_report(state: AgentState):
     - Market Intelligence: {state['market_data']}
     - Source URL: {state.get('pdf_url', 'N/A')}
     
-    REQUIREMENTS:
-    1. **Executive Summary**: High-level verdict.
-    2. **Conflict Analysis**: Compare Financials (Internal View) vs Market (External View). 
-    3. **Financial Highlights**: Use the confidence level to frame this section.
-    4. **Opportunities & Risks**: Synthesized from all sources.
-    5. **Analyst Note**: Comment on the data quality/sources used.
+    STRICT REPORT STRUCTURE:
     
-    OUTPUT FORMAT: Markdown.
+    # Investment Report: [Company Name]
+    **Report Date:** [Current Month Year]
+    **Data Confidence Level:** [High/Medium/Low - Explain why]
+    **Analyst Rating:** [Buy/Hold/Sell/Critical Warning]
+    
+    ## Executive Summary
+    - High-level verdict (2-3 sentences).
+    - Key strengths and immediate risks.
+    - Investment Thesis (Why care?)
+
+    ## Conflict Analysis: Internal vs. External View
+    - **CRITICAL SECTION:** Create a table comparing Management's View (Financials/10-K) vs Market Reality (News/Sentiment).
+    - Highlight specific discrepancies (e.g., "CEO says growth, employees say layoffs").
+    - Assess the severity of each conflict.
+
+    ## Financial Highlights
+    - **Revenue & Profitability:** Key numbers, growth rates, margins (cite sources).
+    - **Balance Sheet Strength:** Cash vs Debt, Liquidity, Credit risk.
+    - **Key Ratios (Estimated):** If exact numbers missing, provide qualitative estimates based on context.
+    
+    ## Opportunities & Risks
+    - **Strategic Opportunities:** AI, Expansion, New Products.
+    - **Critical Risks:** Operational, Regulatory, Cultural, Financial.
+    - **Emerging Threats:** Competitors, Macro factors.
+
+    ## Analyst Note: Data Quality & Limitations
+    - Explicitly state what data was found vs missing.
+    - Rate source reliability (PDF vs Web).
+    - Highlight any temporal mismatches (e.g., 2024 financials vs 2025 news).
+    - Recommended Next Steps for Due Diligence.
+
+    ## Conclusion & Recommendation
+    - Final Verdict.
+    - Target Investor Profile (Who is this for?).
+    - 12-Month Outlook (Bull/Bear/Base cases).
+    
+    TONE: Professional, objective, critical. Avoid marketing fluff. Use Markdown tables and bolding for readability.
     """
     response = llm.invoke([HumanMessage(content=prompt)])
     

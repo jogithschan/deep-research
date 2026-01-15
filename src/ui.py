@@ -22,8 +22,10 @@ def print_artifact(title: str, content: str, style="cyan"):
     # Truncate to 500 chars so panels fit nicely on screen
     preview = content[:500] + "\n... [truncated for display] ..." if len(content) > 500 else content
     
+    rendered = Markdown(preview)
+
     console.print(Panel(
-        preview,
+        rendered,
         title=f"[bold]{title}[/bold]",
         title_align="left",
         border_style=style
