@@ -1,0 +1,7 @@
+langgraph
+langchain-anthropic
+langchain-community
+tavily-python
+pypdf
+python-dotenv
+requests
