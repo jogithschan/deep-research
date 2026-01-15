@@ -2,6 +2,8 @@
 
 **An autonomous investment analyst that synthesizes financial filings (PDFs) with market intelligence (Web Search) to detect conflicts between management narratives and market reality.**
 
+![Deep Research Agent CLI Demo](samples/stripe_run.png)
+
 ## 🎯 Objective
 To build a Proof of Concept (PoC) agent capable of performing deep due diligence on any company—Public or Private—by autonomously:
 1.  **Resolving Entities:** Distinguishing between similarly named entities (e.g., "Peloton Interactive" vs. "Peloton Minerals").
