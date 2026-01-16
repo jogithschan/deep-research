@@ -42,15 +42,16 @@ graph LR
 
 ---
 
-## 📂 Sample Reports Included
+## 📂 Highlighted Sample Reports
 
-Three companies were chosen to test distinct edge cases in the pipeline:
+To validate the agent's capabilities for **Lending & Credit Risk Analysis**, four distinct companies were selected. Each represents a specific "archetype" of risk to stress-test the agent's logic:
 
-| Company | Category | Challenge | Result |
+| Company | Archetype | Why it was selected | Key Agent Behavior Verified |
 | :--- | :--- | :--- | :--- |
-| **Microsoft** | Public Giant | Standard 10-K parsing. | **Success:** Parsed 10-K, identified AI Risks. |
-| **Stripe** | Private / Fintech | No Ticker / No 10-K. | **Success:** Identified as Private, used Strategy B (Web), found Annual Letter data. |
-| **Peloton** | Distressed / Turnaround | Negative Sentiment vs. Financial Lags. | **Success:** Highlighted massive conflict between "turnaround plan" and "recall reality." |
+| **Salesforce** (CRM) | **The Standard / SaaS** | High-quality public data with standard SaaS metrics. Serves as the "Control Group" to verify table extraction accuracy. | **Precision:** Successfully extracted detailed Income/Balance Sheet tables and calculated margins without hallucination. |
+| **Boeing** (BA) | **Industrial Distress** | Capital-intensive balance sheet with massive debt and safety crises. Tests the agent's ability to spot insolvency. | **Risk Detection:** Identified **Negative Equity ($3.3B)** and "Technical Insolvency" despite a 26% revenue increase. |
+| **Stripe** (Private) | **Information Gap** | Private company with NO public 10-K. Tests the agent's fallback logic and honesty. | **Safety:** Correctly reported "Data Unavailable" for financials rather than hallucinating numbers. Flagged opacity as a risk. |
+| **Spotify** (SPOT) | **Social vs. Financial** | Strong recent financials clashing with severe stakeholder (artist/regulatory) backlash. | **Synthesis:** Successfully contrasted improving margins against the "existential threat" of losing social license to operate. |
 
 ---
 

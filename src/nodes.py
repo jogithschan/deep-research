@@ -1,6 +1,7 @@
 import requests
 import os
 import json
+from datetime import datetime
 from langchain_anthropic import ChatAnthropic
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_core.messages import HumanMessage
@@ -38,7 +39,7 @@ def identify_company(state: AgentState):
     """
     response = llm.invoke([HumanMessage(content=prompt)])
     
-    # JSON Parse - quick
+    # JSON Parse
     try:
         data = json.loads(response.content.replace('```json', '').replace('```', '').strip())
         profile = f"{data['name']} ({data['ticker']}) - {data['sector']}\n{data['description']}"
@@ -57,118 +58,128 @@ def identify_company(state: AgentState):
     }
 
 def gather_financials(state: AgentState):
-    """
-    Waterfall Logic: PDF -> Web Fallback
-    """
     ui.print_step("Researching Financials", status="running")
     company = state['company_name']
-    sector = state.get('company_sector', '')
     ticker = state.get('ticker', '')
-    # --- STRATEGY A: PDF ---
-    if ticker and ticker != "None":
-        query_pdf = f"{company} {ticker} annual report 2025 10-K filetype:pdf"
-    else:
-        query_pdf = f"{company} {sector} annual report 2025filetype:pdf"
     
-    results = tavily.search(query=query_pdf, max_results=5)
+    # --- STRATEGY A: PDF  ---
+    if ticker and ticker != "None":
+        query_pdf = f"{company} {ticker} annual report 2025 financial statements Item 8 -proxy filetype:pdf"
+    else:
+        query_pdf = f"{company} annual report 2025 financial statements filetype:pdf"
+    
+    results = tavily.search(query=query_pdf, max_results=3)
     
     pdf_url = None
+    pdf_data = None
+    
+    # Try to find a valid PDF
     for res in results['results']:
         if res['url'].endswith('.pdf'):
             pdf_url = res['url']
-            break
             
-    if pdf_url:
-        ui.print_step(f"Found PDF: {pdf_url}", status="complete")
-        try:
-            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-            response = requests.get(pdf_url, headers=headers, timeout=15)
-            
-            if response.status_code == 200:
+            # --- ATTEMPT DOWNLOAD & PARSE ---
+            try:
+                ui.print_step(f"Analyzing PDF: {pdf_url}", status="running")
+                headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+                response = requests.get(pdf_url, headers=headers, timeout=15)
+                
                 with open("temp_report.pdf", "wb") as f:
                     f.write(response.content)
                 
                 loader = PyPDFLoader("temp_report.pdf")
                 pages = loader.load()
                 
-                if len(pages) > 0:
+                # Smart Slicing: Look for "Consolidated" tables specifically
+                essential_text = []
+                financial_keywords = ["consolidated balance sheets", "consolidated statements of operations", "consolidated statements of cash flows"]
+                
+                for i, page in enumerate(pages):
+                    content = page.page_content.lower()
+                    # We look for keywords AND numbers (to avoid Table of Contents)
+                    if any(k in content for k in financial_keywords) and any(char.isdigit() for char in content):
+                        # Grab this page + next 3
+                        end_index = min(i + 4, len(pages))
+                        essential_text.extend([p.page_content for p in pages[i:end_index]])
+                
+                if not essential_text:
+                    mid = len(pages) // 2
+                    essential_text = [p.page_content for p in pages[:5]] + \
+                                     [p.page_content for p in pages[mid:mid+5]] + \
+                                     [p.page_content for p in pages[-10:]]
 
-                    essential_text = [p.page_content for p in pages[:5]]
+                full_text = "\n".join(essential_text)
+                
+                # Extraction Prompt
+                analysis_prompt = f"""
+                Extract specific financial tables for {company} from the text below.
+                
+                CRITICAL: Output THREE Markdown tables for the last 2 available years.
+                1. **Income Statement** (Revenue, Net Income, EPS)
+                2. **Balance Sheet** (Assets, Debt, Equity)
+                3. **Cash Flow** (Operating, Free Cash Flow)
+                
+                If the text does NOT contain the actual financial numbers, strictly return: "DATA_UNAVAILABLE"
 
-                    financial_keywords = [
-                        "consolidated balance sheets", 
-                        "consolidated statements of operations", 
-                        "consolidated statements of cash flows"
-                    ]
+                TEXT DATA: {full_text[:50000]}
+                """
+                
+                result = llm.invoke([HumanMessage(content=analysis_prompt)])
+                os.remove("temp_report.pdf")
 
-                    found_financials = False
-                    for i, page in enumerate(pages):
-                        content = page.page_content.lower()
-                        if any(k in content for k in financial_keywords):
-                            # Capture this page and the next 5 pages for context
-                            end_index = min(i + 6, len(pages))
-                            essential_text.extend([p.page_content for p in pages[i:end_index]])
-                            found_financials = True
+                # --- VALIDATION STEP ---
+                # If the LLM says data is missing, or returns N/A for Revenue, reject the PDF
+                if "DATA_UNAVAILABLE" in result.content or "Total Revenue | N/A" in result.content:
+                    ui.print_step("PDF lacked financial tables. Skipping...", status="error")
+                    pdf_url = None # Reset to trigger fallback
+                    continue # Try next PDF or go to Web
+                
+                ui.print_artifact("Financial Analysis (Source: PDF)", result.content, style="green")
+                return {
+                    "financial_data": result.content,
+                    "pdf_url": pdf_url,
+                    "data_confidence": "HIGH (Primary Source)"
+                }
 
-                    if not found_financials:
-                        essential_text = [p.page_content for p in pages[:20]] + [p.page_content for p in pages[-10:]]
-                    
-                    full_text = "\n".join(essential_text)
+            except Exception as e:
+                ui.print_step(f"PDF Parse Failed: {str(e)}", status="error")
+                continue
 
-                    analysis_prompt = f"""
-                    Analyze this Annual Report for {company}.
-                    Extract key data (Estimate if exact numbers are messy):
-                    1. Revenue & Profit Trends (Last 2 years)
-                    2. Balance Sheet Health (Cash vs Debt)
-                    3. Key Strategic Risks cited by management
-                    
-                    TEXT DATA: {full_text[:40000]}
-                    """
-                    result = llm.invoke([HumanMessage(content=analysis_prompt)])
-                    
-                    os.remove("temp_report.pdf")
-                    
-                    # VISUAL: Show the financial summary
-                    ui.print_artifact("Financial Analysis (Source: PDF)", result.content, style="green")
-                    
-                    return {
-                        "financial_data": result.content,
-                        "pdf_url": pdf_url,
-                        "data_confidence": "HIGH (Primary Source)"
-                    }
-        except Exception as e:
-            ui.print_step(f"PDF download failed ({str(e)}). Switching strategy.", status="error")
-
-    # --- STRATEGY B: WEB ---
-    ui.print_step("Engaging Fallback Strategy (Web Search)", status="running")
+    # --- STRATEGY B: WEB FALLBACK (Runs if PDF fails or yields N/A) ---
+    ui.print_step("Engaging Targeted Financial Search (Web)", status="running")
+    
+    # Specific queries to fill the specific tables
     queries = [
-        f"{company} revenue net income 2023 2024",
-        f"{company} total debt cash balance sheet 2024",
-        f"{company} business risks and challenges 2024"
+        f"{company} annual income statement 2025 2024 revenue net income table",
+        f"{company} balance sheet 2025 2024 total assets debt equity table",
+        f"{company} cash flow statement 2025 2024 operating investing free cash flow table"
     ]
     
     web_data = ""
     for q in queries:
-        res = tavily.search(query=q, max_results=2)
+        res = tavily.search(query=q, max_results=2, include_raw_content=True)
         for r in res['results']:
             web_data += f"Source: {r['url']}\nContent: {r['content']}\n\n"
             
     fallback_prompt = f"""
-    The annual report PDF was unavailable. Reconstruct the financial health of {company} 
-    using these search results. 
-    Explicitly state that this data is from secondary web sources.
+    The official 10-K PDF was unavailable. Reconstruct the financial tables for {company} using these search results.
+    
+    Task:
+    Create THREE Markdown tables for the last 2 years (2025 vs 2024 or similar):
+    1. **Income Statement**
+    2. **Balance Sheet**
+    3. **Cash Flow**
     
     Web Data: {web_data}
     """
     result = llm.invoke([HumanMessage(content=fallback_prompt)])
     
-    #Visual: web summary
     ui.print_artifact("Financial Analysis (Source: Web)", result.content, style="yellow")
     
     return {
         "financial_data": result.content,
         "pdf_url": None,
-        "data_confidence": "LOW (Secondary Sources)"
+        "data_confidence": "LOW (Secondary Web Sources)"
     }
 
 def gather_market_data(state: AgentState):
@@ -212,6 +223,8 @@ def synthesize_report(state: AgentState):
     # Simple Conflict Check for UI Visual
     has_conflict = "conflict" in state.get('financial_data', '').lower() or "discrepancy" in state.get('market_data', '').lower()
     ui.print_conflict_alert(has_conflict)
+
+    today = datetime.now().strftime("%B %d, %Y")
     
     prompt = f"""
     You are a Deep Research Agent. 
@@ -219,31 +232,32 @@ def synthesize_report(state: AgentState):
     
     INPUTS:
     - Data Confidence Level: {state.get('data_confidence', 'Unknown')}
-    - Financial Analysis: {state['financial_data']}
+    - Financial Data (Contains Tables): {state['financial_data']}
     - Market Intelligence: {state['market_data']}
     - Source URL: {state.get('pdf_url', 'N/A')}
     
     STRICT REPORT STRUCTURE:
     
-    # Investment Report: [Company Name]
-    **Report Date:** [Current Month Year]
-    **Data Confidence Level:** [High/Medium/Low - Explain why]
+    # Investment Report: {state.get('company_name')}
+    **Report Date:**: {today}
+    **Data Confidence Level:** [High/Medium/Low]
     **Analyst Rating:** [Buy/Hold/Sell/Critical Warning]
     
     ## Executive Summary
     - High-level verdict (2-3 sentences).
-    - Key strengths and immediate risks.
-    - Investment Thesis (Why care?)
+    - Investment Thesis.
 
     ## Conflict Analysis: Internal vs. External View
-    - **CRITICAL SECTION:** Create a table comparing Management's View (Financials/10-K) vs Market Reality (News/Sentiment).
-    - Highlight specific discrepancies (e.g., "CEO says growth, employees say layoffs").
-    - Assess the severity of each conflict.
+    - **CRITICAL:** Create a table comparing Management's View (Financials) vs Market Reality (Sentiment).
+    - Assess severity of conflicts.
 
-    ## Financial Highlights
-    - **Revenue & Profitability:** Key numbers, growth rates, margins (cite sources).
-    - **Balance Sheet Strength:** Cash vs Debt, Liquidity, Credit risk.
-    - **Key Ratios (Estimated):** If exact numbers missing, provide qualitative estimates based on context.
+    ## Financial Highlights (Detailed)
+    - **CRITICAL:** You MUST reproduce the "Income Statement", "Balance Sheet", and "Cash Flow" tables provided in the Financial Data input. 
+    - Do not summarize these tables into text; display the full markdown tables for the last 2 years.
+    - Below the tables, provide a brief analysis of:
+      - Margins (Gross/Net)
+      - Liquidity (Cash vs Debt position)
+      - Solvency concerns (if any)
     
     ## Opportunities & Risks
     - **Strategic Opportunities:** AI, Expansion, New Products.
@@ -252,16 +266,15 @@ def synthesize_report(state: AgentState):
 
     ## Analyst Note: Data Quality & Limitations
     - Explicitly state what data was found vs missing.
-    - Rate source reliability (PDF vs Web).
-    - Highlight any temporal mismatches (e.g., 2024 financials vs 2025 news).
+    - Rate source reliability.
     - Recommended Next Steps for Due Diligence.
 
     ## Conclusion & Recommendation
     - Final Verdict.
-    - Target Investor Profile (Who is this for?).
-    - 12-Month Outlook (Bull/Bear/Base cases).
+    - Target Investor Profile.
+    - 12-Month Outlook.
     
-    TONE: Professional, objective, critical. Avoid marketing fluff. Use Markdown tables and bolding for readability.
+    TONE: Professional, objective, critical. Use Markdown tables for all financial data.
     """
     response = llm.invoke([HumanMessage(content=prompt)])
     
